@@ -950,42 +950,6 @@ def main() -> None:
         except Exception as e:
             await update.message.reply_text(f"❌ 设置失败: {e}")
 
-    # /menu：发一条带按钮的消息（群聊可点）
-    async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 任务状态", callback_data="menu_status")],
-            [InlineKeyboardButton("📋 任务列表", callback_data="menu_tasks")],
-        ])
-        await update.message.reply_text("👇 选择操作：", reply_markup=keyboard)
-
-    # 处理菜单按钮点击
-    async def on_menu_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query or not query.data:
-            return
-        await query.answer()
-        if query.data == "menu_status":
-            tasks = await task_queue.get_user_tasks(query.from_user.id)
-            if not tasks:
-                await query.edit_message_text("当前没有任务。")
-                return
-            text = "📊 任务状态：\n\n"
-            for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)[:10]:
-                em = {"PENDING":"⏳","PROCESSING":"🔄","COMPLETED":"✅","FAILED":"❌","CANCELLED":"🚫"}.get(t.status.value.upper(), "❓")
-                text += f"{em} #{t.task_id}: {t.status.value} | {t.prompt[:20]}...\n"
-            await query.edit_message_text(text)
-        elif query.data == "menu_tasks":
-            tasks = await task_queue.get_user_tasks(query.from_user.id)
-            if not tasks:
-                await query.edit_message_text("当前没有任务。")
-                return
-            keyboard = []
-            for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)[:10]:
-                keyboard.append([InlineKeyboardButton(f"#{t.task_id} {t.prompt[:15]}...", callback_data=f"task_{t.task_id}")])
-            await query.edit_message_text("最近的任务：", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CallbackQueryHandler(on_menu_click, pattern="^menu_"))
     app.add_handler(CommandHandler("setmenu", setmenu_cmd))
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
