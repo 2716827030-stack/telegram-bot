@@ -1,5 +1,5 @@
 # Core
-python-telegram-bot==22.7
+python-telegram-bot[job-queue]==22.7
 python-dotenv==1.0.1
 httpx==0.28.1
 
