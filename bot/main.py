@@ -706,6 +706,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_user:
         return
     
+    # 新照片到来，清掉旧提示词（新图需要新提示词）
+    context.user_data.pop(PENDING_PROMPT, None)
+
     # 媒体组：只对第一张回复"图片已收到"，其余静默处理
     mg_id = update.message.media_group_id
     if mg_id:
@@ -739,6 +742,8 @@ async def on_document_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not mime.startswith("image/"):
         return
     
+    # 新照片到来，清掉旧提示词
+    context.user_data.pop(PENDING_PROMPT, None)
     # 提前占位，防止 await 期间 on_text 看不到 UPLOADING_MESSAGE
     context.user_data[UPLOADING_MESSAGE] = True
     msg = await update.message.reply_text("✅ 图片已收到！正在处理中...")
