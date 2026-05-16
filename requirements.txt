@@ -1,14 +1,15 @@
 # Core
 python-telegram-bot[job-queue]==22.7
+APScheduler==3.10.4
 python-dotenv==1.0.1
 httpx==0.28.1
 
 # Image processing
-pillow==12.2.0
-numpy==2.4.4
-opencv-python-headless==4.13.0.92
+pillow==10.4.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
 
 # Video processing
-av==17.0.1
-imageio==2.37.3
-imageio-ffmpeg==0.6.0
+av==12.3.0
+imageio==2.35.1
+imageio-ffmpeg==0.5.1
