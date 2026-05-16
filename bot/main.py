@@ -926,6 +926,31 @@ def main() -> None:
         .build()
     )
     
+    # /setmenu：手动为当前群/话题设置命令菜单
+    async def setmenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_type = update.effective_chat.type if update.effective_chat else "private"
+        if chat_type == "private":
+            await update.message.reply_text("在群里发这个命令才有用。")
+            return
+        from telegram import BotCommandScopeChat
+        cmds = [
+            BotCommand("start", "开始使用"),
+            BotCommand("help", "显示帮助"),
+            BotCommand("status", "查看任务状态"),
+            BotCommand("tasks", "查看所有任务"),
+            BotCommand("cancel", "取消任务"),
+            BotCommand("setmenu", "设置群菜单"),
+        ]
+        try:
+            await context.bot.set_my_commands(
+                cmds,
+                scope=BotCommandScopeChat(chat_id=update.effective_chat.id),
+            )
+            await update.message.reply_text("✅ 菜单已设置")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 设置失败: {e}")
+
+    app.add_handler(CommandHandler("setmenu", setmenu_cmd))
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
