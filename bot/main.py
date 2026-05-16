@@ -915,6 +915,7 @@ def main() -> None:
     app = (
         Application.builder()
         .token(token)
+        .job_queue(JobQueue())
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
