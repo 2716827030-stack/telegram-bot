@@ -1,0 +1,14 @@
+# Core
+python-telegram-bot==22.7
+python-dotenv==1.0.1
+httpx==0.28.1
+
+# Image processing
+pillow==12.2.0
+numpy==2.4.4
+opencv-python-headless==4.13.0.92
+
+# Video processing
+av==17.0.1
+imageio==2.37.3
+imageio-ffmpeg==0.6.0
