@@ -936,6 +936,33 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, on_document_image))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
+    # 被拉入新群/话题时自动设置命令菜单
+    from telegram import BotCommandScopeChat
+    from telegram.ext import ChatMemberHandler
+
+    async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.my_chat_member:
+            return
+        new_status = update.my_chat_member.new_chat_member.status
+        if new_status in ("member", "administrator"):
+            cmds = [
+                BotCommand("start", "开始使用"),
+                BotCommand("help", "显示帮助"),
+                BotCommand("status", "查看任务状态"),
+                BotCommand("tasks", "查看所有任务"),
+                BotCommand("cancel", "取消任务"),
+            ]
+            try:
+                await context.bot.set_my_commands(
+                    cmds,
+                    scope=BotCommandScopeChat(chat_id=update.effective_chat.id),
+                )
+                logger.info(f"已为群 {update.effective_chat.id} 设置命令菜单")
+            except Exception as e:
+                logger.error(f"设置群命令菜单失败: {e}")
+
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
     logger.info("Bot 启动中...")
     logger.info("功能说明：")
     logger.info("- DuckDuckGoose 隐写术检测与自动解码")
