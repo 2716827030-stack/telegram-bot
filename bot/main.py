@@ -572,27 +572,38 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             await update.message.reply_text("取消失败，任务可能已完成或不存在。")
     else:
+        keyboard = []
+
+        # 待处理图片（还没填入提示词）
+        pending_images = context.user_data.get(PENDING_RH_IMAGES, [])
+        if pending_images:
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"取消 {len(pending_images)} 张待处理图片（未填提示词）",
+                    callback_data="cancel_pending"
+                )
+            ])
+
+        # 进行中的任务
         tasks = await task_queue.get_user_tasks(user_id)
         pending_tasks = [
             t for t in tasks
             if t.status in (TaskStatus.PENDING, TaskStatus.PROCESSING)
         ]
-        
-        if not pending_tasks:
-            await update.message.reply_text("没有正在处理的任务可取消。")
-            return
-        
-        keyboard = []
         for task in pending_tasks:
             keyboard.append([
                 InlineKeyboardButton(
-                    f"取消 #task.task_id: {task.prompt[:30]}...",
+                    f"取消 #{task.task_id}: {task.prompt[:30]}...",
                     callback_data=f"cancel_{task.task_id}"
                 )
             ])
-        
+
+        if not keyboard:
+            await update.message.reply_text("没有待处理的图片或任务可取消。")
+            return
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("选择要取消的任务：", reply_markup=reply_markup)
+        await update.message.reply_text("选择要取消的内容：", reply_markup=reply_markup)
 
 
 async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -604,10 +615,18 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     user_id = query.from_user.id
     
-    if query.data.startswith("cancel_"):
+    if query.data == "cancel_pending":
+        pending = context.user_data.pop(PENDING_RH_IMAGES, None)
+        count = len(pending) if pending else 0
+        await query.edit_message_text(
+            f"已取消 {count} 张待处理图片。请发送新图片重新开始。",
+            reply_markup=None,
+        )
+
+    elif query.data.startswith("cancel_"):
         task_id = query.data[7:]
         task = await task_queue.get_task(task_id)
-        
+
         if task and task.user_id == user_id:
             success = await task_queue.cancel_task(task_id)
             if success:
@@ -616,7 +635,7 @@ async def on_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await query.edit_message_text("取消失败。")
         else:
             await query.edit_message_text("该任务不属于你或不存在。")
-    
+
     elif query.data.startswith("task_"):
         task_id = query.data[5:]
         task = await task_queue.get_task(task_id)
@@ -726,6 +745,9 @@ async def _download_and_upload_background(
             # 追加到待处理图片列表，等待提示词
             pending_list = context.user_data.setdefault(PENDING_RH_IMAGES, [])
             pending_list.append({"rh_name": rh_name, "image_bytes": img_bytes})
+            cancel_btn = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ 取消全部待处理图片", callback_data="cancel_pending")
+            ]])
             if len(pending_list) == 1:
                 uploading_msg_id = context.user_data.pop(UPLOADING_MESSAGE, None)
                 if uploading_msg_id:
@@ -733,7 +755,8 @@ async def _download_and_upload_background(
                         chat_id=chat_id,
                         message_id=uploading_msg_id,
                         text=f"✅ {len(pending_list)}张图片已处理完毕！\n\n请直接回复提示词（文字），我将开始生成图片。\n"
-                             "💡 发送多张图片后只需输入一次提示词即可同时处理。"
+                             "💡 发送多张图片后只需输入一次提示词即可同时处理。",
+                        reply_markup=cancel_btn,
                     )
             else:
                 uploading_msg_id = context.user_data.get(UPLOADING_MESSAGE)
@@ -742,7 +765,8 @@ async def _download_and_upload_background(
                         chat_id=chat_id,
                         message_id=uploading_msg_id,
                         text=f"✅ {len(pending_list)}张图片已处理完毕！\n\n请直接回复提示词（文字），我将开始生成图片。\n"
-                             "💡 发送多张图片后只需输入一次提示词即可同时处理。"
+                             "💡 发送多张图片后只需输入一次提示词即可同时处理。",
+                        reply_markup=cancel_btn,
                     )
     except Exception as e:
         logger.exception("后台处理失败")
