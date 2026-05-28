@@ -61,6 +61,7 @@ class GenerationTask:
     message_id: int
     rh_image_name: str
     prompt: str
+    prompts: list[str] = field(default_factory=list)  # 支持多个提示词
     original_image_bytes: Optional[bytes] = None  # 保存原始图片字节，用于读取尺寸
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = field(default_factory=datetime.now)
@@ -70,7 +71,8 @@ class GenerationTask:
     result_urls: list[str] = field(default_factory=list)
     decoded_text: Optional[str] = None
     decoded_result: Optional[tuple] = None  # (type, data)
-    video_frames: list[bytes] = field(default_factory=list)  # 视频帧的列表
+    video_frames: list[bytes] = field(default_factory=list)  # 视频帧的列表（单提示词兼容）
+    all_video_frames: list[list[bytes]] = field(default_factory=list)  # 每张鸭鸭图解码后的帧列表
     is_stego: bool = False  # 是否检测到隐写
     cached_images: list[bytes] = field(default_factory=list)  # 缓存的生成图片，避免重复下载
 
@@ -175,7 +177,7 @@ class TaskQueue:
                 
                 # 创建 RunningHub 任务
                 task_id_rh = await asyncio.wait_for(
-                    rh_client.create_task(task.rh_image_name, task.prompt, extra_node_info=extra_node_info),
+                    rh_client.create_task(task.rh_image_name, task.prompt, prompts=task.prompts if task.prompts else None, extra_node_info=extra_node_info),
                     timeout=30.0
                 )
                 
@@ -237,40 +239,47 @@ class TaskQueue:
                         pass
                     return
 
-                # 检测隐写（使用缓存的第一张图）
+                # 检测隐写（对所有生成图片进行解码）
                 task.decoded_result = None
+                task.all_video_frames = []
                 for idx, image_bytes in enumerate(task.cached_images):
+                    frames_for_this = []
                     try:
                         is_stego, decoded_text, raw_data, ext = detect_and_decode(image_bytes)
                         if is_stego:
                             task.is_stego = True
-                            logger.info(f"检测到隐写内容！扩展名: {ext}")
+                            logger.info(f"检测到隐写内容！图片{idx+1} 扩展名: {ext}")
 
                             if ext.lower() in ["png", "jpg", "jpeg", "bmp", "webp", "gif"]:
                                 temp_dir = os.path.join(os.path.dirname(__file__), "temp")
                                 os.makedirs(temp_dir, exist_ok=True)
-                                temp_file = os.path.join(temp_dir, f"decoded_{task_id}.{ext}")
+                                temp_file = os.path.join(temp_dir, f"decoded_{task_id}_{idx}.{ext}")
                                 with open(temp_file, "wb") as f:
                                     f.write(raw_data)
-                                task.decoded_result = ("image", temp_file)
+                                if idx == 0:
+                                    task.decoded_result = ("image", temp_file)
                             elif ext.lower() == "mp4":
                                 frames = extract_video_frames(raw_data)
                                 if not frames:
                                     frames = extract_video_frames_opencv(raw_data)
-                                task.video_frames = frames
+                                frames_for_this = frames
+                                if idx == 0:
+                                    task.video_frames = frames
+                                logger.info(f"鸭鸭图{idx+1}解码得到 {len(frames)} 帧")
                             elif ext.lower() == "txt":
-                                task.decoded_result = ("text", decoded_text)
+                                if idx == 0:
+                                    task.decoded_result = ("text", decoded_text)
                             else:
                                 temp_dir = os.path.join(os.path.dirname(__file__), "temp")
                                 os.makedirs(temp_dir, exist_ok=True)
-                                temp_file = os.path.join(temp_dir, f"decoded_{task_id}.{ext}")
+                                temp_file = os.path.join(temp_dir, f"decoded_{task_id}_{idx}.{ext}")
                                 with open(temp_file, "wb") as f:
                                     f.write(raw_data)
-                                task.decoded_result = ("file", temp_file)
-                            break
+                                if idx == 0:
+                                    task.decoded_result = ("file", temp_file)
                     except Exception as e:
                         logger.error(f"隐写检测失败 (图片{idx+1}): {e}")
-                        continue
+                    task.all_video_frames.append(frames_for_this)
 
                 # 发送结果
                 try:
@@ -348,10 +357,43 @@ class TaskQueue:
             return image_bytes
 
     async def _send_result_safe(self, task: GenerationTask, bot):
-        """发送一个媒体组，失败只发文字"""
+        """发送结果，支持多个提示词的多媒体组"""
         from telegram import InputMediaPhoto
 
         chat_id = task.chat_id
+
+        # 如果有多个提示词，每个提示词对应一张鸭鸭图，发送其解码后的帧
+        if task.prompts and len(task.prompts) > 1 and task.cached_images:
+            num_prompts = len(task.prompts)
+
+            for idx, prompt in enumerate(task.prompts):
+                # 优先使用解码后的帧，否则回退到原始鸭鸭图
+                if idx < len(task.all_video_frames) and task.all_video_frames[idx]:
+                    group_images = task.all_video_frames[idx]
+                elif idx < len(task.cached_images):
+                    group_images = [task.cached_images[idx]]
+                else:
+                    continue
+
+                caption = prompt[:1024]
+                compressed = [self._compress_image(img, max_mb=0.5) for img in group_images]
+
+                try:
+                    media = []
+                    for img_idx, data in enumerate(compressed):
+                        c = caption if img_idx == 0 else None
+                        media.append(InputMediaPhoto(data, caption=c))
+                    await bot.send_media_group(chat_id=chat_id, media=media, read_timeout=120, write_timeout=120)
+                    logger.info(f"[结果] 媒体组 {idx+1}/{num_prompts} 成功 task_id={task.task_id}")
+                except Exception as e:
+                    logger.error(f"[结果] 媒体组 {idx+1}/{num_prompts} 失败: {e}")
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=f"✓ 任务 #{task.task_id} 组 {idx+1} 已完成\n提示词: {prompt[:50]}...")
+                    except:
+                        pass
+            return
+
+        # 单个提示词，使用原有逻辑
         caption = (task.prompt or "")[:1024]
 
         raw_images: list[bytes] = []
@@ -649,19 +691,40 @@ async def _download_and_upload_background(
         # 检查是否有待处理的提示词！（不 pop，允许多个上传任务共用）
         pending_prompt = context.user_data.get(PENDING_PROMPT)
         if pending_prompt:
+            # 解析多个提示词
+            import re
+            prompts_list = []
+            bracket_matches = re.findall(r'（([^）]+)）', pending_prompt)
+            if bracket_matches and len(bracket_matches) >= 1:
+                prompts_list = [p.strip() for p in bracket_matches if p.strip()]
+            else:
+                prompts_list = [p.strip() for p in pending_prompt.split('\n') if p.strip()]
+
             # 立即用已有的提示词创建任务
             global task_counter
             task_counter += 1
             task_id = str(task_counter)
-            task = GenerationTask(
-                task_id=task_id,
-                user_id=user_id,
-                chat_id=chat_id,
-                message_id=msg_id,
-                rh_image_name=rh_name,
-                prompt=pending_prompt,
-                original_image_bytes=img_bytes,
-            )
+            if len(prompts_list) > 1:
+                task = GenerationTask(
+                    task_id=task_id,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    rh_image_name=rh_name,
+                    prompt=prompts_list[0],
+                    prompts=prompts_list,
+                    original_image_bytes=img_bytes,
+                )
+            else:
+                task = GenerationTask(
+                    task_id=task_id,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    rh_image_name=rh_name,
+                    prompt=pending_prompt,
+                    original_image_bytes=img_bytes,
+                )
             await task_queue.add_task(task)
             asyncio.create_task(task_queue.process_task(task_id, rh, context))
             logger.info(f"自动创建任务 #{task_id}（上传完成，提示词已就绪）")
@@ -765,7 +828,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
     if text.startswith("/"):
         return
-    
+
+    # 解析多个提示词：括号格式（内容1）（内容2）或换行分隔
+    import re
+    prompts_list = []
+    bracket_matches = re.findall(r'（([^）]+)）', text)
+    if bracket_matches and len(bracket_matches) >= 1:
+        prompts_list = [p.strip() for p in bracket_matches if p.strip()]
+    else:
+        prompts_list = [p.strip() for p in text.split('\n') if p.strip()]
+
     # 检查是否还在上传中！如果是，就保存提示词！
     if UPLOADING_MESSAGE in context.user_data:
         context.user_data[PENDING_PROMPT] = text
@@ -778,30 +850,51 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             for entry in done_list:
                 task_counter += 1
                 task_id = str(task_counter)
-                task = GenerationTask(
-                    task_id=task_id,
-                    user_id=update.effective_user.id,
-                    chat_id=update.message.chat_id,
-                    message_id=update.message.id,
-                    rh_image_name=entry["rh_name"],
-                    prompt=text,
-                    original_image_bytes=entry["image_bytes"],
-                )
+                if len(prompts_list) > 1:
+                    task = GenerationTask(
+                        task_id=task_id,
+                        user_id=update.effective_user.id,
+                        chat_id=update.message.chat_id,
+                        message_id=update.message.id,
+                        rh_image_name=entry["rh_name"],
+                        prompt=prompts_list[0],
+                        prompts=prompts_list,
+                        original_image_bytes=entry["image_bytes"],
+                    )
+                else:
+                    task = GenerationTask(
+                        task_id=task_id,
+                        user_id=update.effective_user.id,
+                        chat_id=update.message.chat_id,
+                        message_id=update.message.id,
+                        rh_image_name=entry["rh_name"],
+                        prompt=text,
+                        original_image_bytes=entry["image_bytes"],
+                    )
                 await task_queue.add_task(task)
                 asyncio.create_task(task_queue.process_task(task_id, rh, context))
                 task_ids.append(task_id)
+
+            if len(prompts_list) > 1:
+                prompt_preview = f"共 {len(prompts_list)} 个提示词"
+            else:
+                prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
             await update.message.reply_text(
                 f"✅ {len(task_ids)}个任务已提交！（剩余图片上传中，将自动处理）\n\n"
-                f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}",
+                f"{prompt_preview}",
                 reply_to_message_id=update.message.id
             )
         else:
+            if len(prompts_list) > 1:
+                prompt_preview = f"共 {len(prompts_list)} 个提示词"
+            else:
+                prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
             await update.message.reply_text(
-                f"✅ 提示词已保存！等图片上传完成后自动开始处理。\n\n提示词: {text[:50]}{'...' if len(text) > 50 else ''}",
+                f"✅ 提示词已保存！等图片上传完成后自动开始处理。\n\n{prompt_preview}",
                 reply_to_message_id=update.message.id
             )
         return
-    
+
     pending_list = context.user_data.pop(PENDING_RH_IMAGES, None)
     if not pending_list:
         await update.message.reply_text(
@@ -816,23 +909,39 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for entry in pending_list:
         task_counter += 1
         task_id = str(task_counter)
-        task = GenerationTask(
-            task_id=task_id,
-            user_id=update.effective_user.id,
-            chat_id=update.message.chat_id,
-            message_id=update.message.id,
-            rh_image_name=entry["rh_name"],
-            prompt=text,
-            original_image_bytes=entry["image_bytes"],
-        )
+        if len(prompts_list) > 1:
+            task = GenerationTask(
+                task_id=task_id,
+                user_id=update.effective_user.id,
+                chat_id=update.message.chat_id,
+                message_id=update.message.id,
+                rh_image_name=entry["rh_name"],
+                prompt=prompts_list[0],
+                prompts=prompts_list,
+                original_image_bytes=entry["image_bytes"],
+            )
+        else:
+            task = GenerationTask(
+                task_id=task_id,
+                user_id=update.effective_user.id,
+                chat_id=update.message.chat_id,
+                message_id=update.message.id,
+                rh_image_name=entry["rh_name"],
+                prompt=text,
+                original_image_bytes=entry["image_bytes"],
+            )
         await task_queue.add_task(task)
         asyncio.create_task(task_queue.process_task(task_id, rh, context))
         task_ids.append(task_id)
 
     count = len(task_ids)
+    if len(prompts_list) > 1:
+        prompt_preview = f"共 {len(prompts_list)} 个提示词"
+    else:
+        prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
     await update.message.reply_text(
         f"✅ {count}个任务已提交！\n\n"
-        f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}\n\n"
+        f"{prompt_preview}\n\n"
         f"⏳ 后台处理中，完成后会自动通知你。\n"
         f"你可以继续发送其他图片或提示词。\n\n"
         f"任务ID: {', '.join(f'#{tid}' for tid in task_ids)}\n"

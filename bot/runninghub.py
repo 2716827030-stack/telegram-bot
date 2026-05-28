@@ -69,19 +69,34 @@ class RunningHubClient:
             raise RunningHubError("upload response missing data.fileName")
         return str(fn)
 
-    async def create_task(self, rh_image_filename: str, prompt: str, extra_node_info: list[dict] | None = None) -> str:
+    async def create_task(self, rh_image_filename: str, prompt: str = None, prompts: list[str] = None, extra_node_info: list[dict] | None = None) -> str:
+        import os
         node_info_list = [
             {
                 "nodeId": self._cfg.load_image_node_id,
                 "fieldName": self._cfg.load_image_field,
                 "fieldValue": rh_image_filename,
             },
-            {
+        ]
+
+        # 支持多个提示词（环境变量 RUNNINGHUB_PROMPT_NODE_IDS 指定多个节点ID，逗号分隔）
+        prompt_node_ids_str = os.environ.get("RUNNINGHUB_PROMPT_NODE_IDS", self._cfg.prompt_node_id)
+        prompt_node_ids = [pid.strip() for pid in prompt_node_ids_str.split(",")]
+
+        if prompts and len(prompts) > 1:
+            for i, p in enumerate(prompts):
+                if i < len(prompt_node_ids):
+                    node_info_list.append({
+                        "nodeId": prompt_node_ids[i],
+                        "fieldName": self._cfg.prompt_field,
+                        "fieldValue": p,
+                    })
+        elif prompt:
+            node_info_list.append({
                 "nodeId": self._cfg.prompt_node_id,
                 "fieldName": self._cfg.prompt_field,
                 "fieldValue": prompt,
-            },
-        ]
+            })
         if extra_node_info:
             node_info_list.extend(extra_node_info)
         
