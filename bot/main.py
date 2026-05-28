@@ -1074,7 +1074,7 @@ def main() -> None:
     logger.info("功能说明：")
     logger.info("- DuckDuckGoose 隐写术检测与自动解码")
     logger.info("- 即时响应 + 后台异步处理")
-    logger.info("- 并发任务队列（最多10个任务同时处理）")
+    logger.info("- 并发任务队列（最多20个任务同时处理）")
     logger.info("- 完善的错误处理与超时机制")
     
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
