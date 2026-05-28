@@ -738,9 +738,14 @@ async def _download_and_upload_background(
             await task_queue.add_task(task)
             asyncio.create_task(task_queue.process_task(task_id, rh, context))
             logger.info(f"自动创建任务 #{task_id}（上传完成，提示词已就绪）")
-            # 如果没有更多待处理图和上传中的图，清理提示词
-            if not context.user_data.get(PENDING_RH_IMAGES) and UPLOADING_MESSAGE not in context.user_data:
+            # 上传计数减一，全部完成时清理
+            count = context.user_data.get("_upload_count", 1) - 1
+            if count <= 0:
+                context.user_data.pop("_upload_count", None)
                 context.user_data.pop(PENDING_PROMPT, None)
+                context.user_data.pop(UPLOADING_MESSAGE, None)
+            else:
+                context.user_data["_upload_count"] = count
         else:
             # 追加到待处理图片列表，等待提示词
             pending_list = context.user_data.setdefault(PENDING_RH_IMAGES, [])
@@ -748,31 +753,28 @@ async def _download_and_upload_background(
             cancel_btn = InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ 取消全部待处理图片", callback_data="cancel_pending")
             ]])
-            if len(pending_list) == 1:
-                uploading_msg_id = context.user_data.pop(UPLOADING_MESSAGE, None)
-                if uploading_msg_id:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=uploading_msg_id,
-                        text=f"✅ {len(pending_list)}张图片已处理完毕！\n\n请直接回复提示词（文字），我将开始生成图片。\n"
-                             "💡 发送多张图片后只需输入一次提示词即可同时处理。",
-                        reply_markup=cancel_btn,
-                    )
-            else:
-                uploading_msg_id = context.user_data.get(UPLOADING_MESSAGE)
-                if uploading_msg_id and isinstance(uploading_msg_id, int):
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=uploading_msg_id,
-                        text=f"✅ {len(pending_list)}张图片已处理完毕！\n\n请直接回复提示词（文字），我将开始生成图片。\n"
-                             "💡 发送多张图片后只需输入一次提示词即可同时处理。",
-                        reply_markup=cancel_btn,
-                    )
+            # 上传计数减一
+            count = context.user_data.get("_upload_count", 1) - 1
+            msg_id = context.user_data.get(UPLOADING_MESSAGE)
+            if isinstance(msg_id, int):
+                if count <= 0:
+                    context.user_data.pop("_upload_count", None)
+                    context.user_data.pop(UPLOADING_MESSAGE, None)
+                else:
+                    context.user_data["_upload_count"] = count
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"✅ {len(pending_list)}张图片已处理完毕！\n\n请直接回复提示词（文字），我将开始生成图片。\n"
+                         "💡 发送多张图片后只需输入一次提示词即可同时处理。",
+                    reply_markup=cancel_btn,
+                )
     except Exception as e:
         logger.exception("后台处理失败")
         context.user_data.pop(PENDING_PROMPT, None)
+        context.user_data.pop("_upload_count", None)
         uploading_msg_id = context.user_data.pop(UPLOADING_MESSAGE, None)
-        if uploading_msg_id:
+        if isinstance(uploading_msg_id, int):
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=uploading_msg_id,
@@ -788,18 +790,20 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(PENDING_PROMPT, None)
 
     # 媒体组：只对第一张回复"图片已收到"，其余静默处理
+    # _upload_count 追踪并发上传数量，UPLOADING_MESSAGE 存消息ID
     mg_id = update.message.media_group_id
     if mg_id:
         seen = context.application.bot_data.setdefault("_seen_media_groups", {})
         if mg_id in seen:
-            context.user_data[UPLOADING_MESSAGE] = True  # 占位，不回复
+            # 同组后续图片：不创建新消息，只增加计数
+            context.user_data["_upload_count"] = context.user_data.get("_upload_count", 0) + 1
         else:
             seen[mg_id] = True
-            context.user_data[UPLOADING_MESSAGE] = True
+            context.user_data["_upload_count"] = context.user_data.get("_upload_count", 0) + 1
             msg = await update.message.reply_text("✅ 图片已收到！正在处理中...")
             context.user_data[UPLOADING_MESSAGE] = msg.message_id
     else:
-        context.user_data[UPLOADING_MESSAGE] = True
+        context.user_data["_upload_count"] = context.user_data.get("_upload_count", 0) + 1
         msg = await update.message.reply_text("✅ 图片已收到！正在处理中...")
         context.user_data[UPLOADING_MESSAGE] = msg.message_id
 
@@ -822,8 +826,7 @@ async def on_document_image(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # 新照片到来，清掉旧提示词
     context.user_data.pop(PENDING_PROMPT, None)
-    # 提前占位，防止 await 期间 on_text 看不到 UPLOADING_MESSAGE
-    context.user_data[UPLOADING_MESSAGE] = True
+    context.user_data["_upload_count"] = context.user_data.get("_upload_count", 0) + 1
     msg = await update.message.reply_text("✅ 图片已收到！正在处理中...")
     context.user_data[UPLOADING_MESSAGE] = msg.message_id
 
