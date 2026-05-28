@@ -691,40 +691,31 @@ async def _download_and_upload_background(
         # 检查是否有待处理的提示词！（不 pop，允许多个上传任务共用）
         pending_prompt = context.user_data.get(PENDING_PROMPT)
         if pending_prompt:
-            # 解析多个提示词
+            # 解析多个提示词：括号格式或换行分隔
             import re
-            prompts_list = []
             bracket_matches = re.findall(r'（([^）]+)）', pending_prompt)
-            if bracket_matches and len(bracket_matches) >= 1:
+            if bracket_matches:
                 prompts_list = [p.strip() for p in bracket_matches if p.strip()]
             else:
                 prompts_list = [p.strip() for p in pending_prompt.split('\n') if p.strip()]
+
+            if not prompts_list:
+                prompts_list = [pending_prompt]
 
             # 立即用已有的提示词创建任务
             global task_counter
             task_counter += 1
             task_id = str(task_counter)
-            if len(prompts_list) > 1:
-                task = GenerationTask(
-                    task_id=task_id,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    rh_image_name=rh_name,
-                    prompt=prompts_list[0],
-                    prompts=prompts_list,
-                    original_image_bytes=img_bytes,
-                )
-            else:
-                task = GenerationTask(
-                    task_id=task_id,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    rh_image_name=rh_name,
-                    prompt=pending_prompt,
-                    original_image_bytes=img_bytes,
-                )
+            task = GenerationTask(
+                task_id=task_id,
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=msg_id,
+                rh_image_name=rh_name,
+                prompt=prompts_list[0],
+                prompts=prompts_list,
+                original_image_bytes=img_bytes,
+            )
             await task_queue.add_task(task)
             asyncio.create_task(task_queue.process_task(task_id, rh, context))
             logger.info(f"自动创建任务 #{task_id}（上传完成，提示词已就绪）")
@@ -829,14 +820,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if text.startswith("/"):
         return
 
-    # 解析多个提示词：括号格式（内容1）（内容2）或换行分隔
+    # 解析提示词：括号格式（内容1）（内容2）或换行分隔
     import re
-    prompts_list = []
     bracket_matches = re.findall(r'（([^）]+)）', text)
-    if bracket_matches and len(bracket_matches) >= 1:
+    if bracket_matches:
         prompts_list = [p.strip() for p in bracket_matches if p.strip()]
     else:
         prompts_list = [p.strip() for p in text.split('\n') if p.strip()]
+
+    if not prompts_list:
+        return
+
+    has_multi = len(prompts_list) > 1
 
     # 检查是否还在上传中！如果是，就保存提示词！
     if UPLOADING_MESSAGE in context.user_data:
@@ -850,45 +845,34 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             for entry in done_list:
                 task_counter += 1
                 task_id = str(task_counter)
-                if len(prompts_list) > 1:
-                    task = GenerationTask(
-                        task_id=task_id,
-                        user_id=update.effective_user.id,
-                        chat_id=update.message.chat_id,
-                        message_id=update.message.id,
-                        rh_image_name=entry["rh_name"],
-                        prompt=prompts_list[0],
-                        prompts=prompts_list,
-                        original_image_bytes=entry["image_bytes"],
-                    )
-                else:
-                    task = GenerationTask(
-                        task_id=task_id,
-                        user_id=update.effective_user.id,
-                        chat_id=update.message.chat_id,
-                        message_id=update.message.id,
-                        rh_image_name=entry["rh_name"],
-                        prompt=text,
-                        original_image_bytes=entry["image_bytes"],
-                    )
+                task = GenerationTask(
+                    task_id=task_id,
+                    user_id=update.effective_user.id,
+                    chat_id=update.message.chat_id,
+                    message_id=update.message.id,
+                    rh_image_name=entry["rh_name"],
+                    prompt=prompts_list[0],
+                    prompts=prompts_list,
+                    original_image_bytes=entry["image_bytes"],
+                )
                 await task_queue.add_task(task)
                 asyncio.create_task(task_queue.process_task(task_id, rh, context))
                 task_ids.append(task_id)
 
-            if len(prompts_list) > 1:
+            if has_multi:
                 prompt_preview = f"共 {len(prompts_list)} 个提示词"
             else:
-                prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
+                prompt_preview = f"提示词: {prompts_list[0][:50]}"
             await update.message.reply_text(
                 f"✅ {len(task_ids)}个任务已提交！（剩余图片上传中，将自动处理）\n\n"
                 f"{prompt_preview}",
                 reply_to_message_id=update.message.id
             )
         else:
-            if len(prompts_list) > 1:
+            if has_multi:
                 prompt_preview = f"共 {len(prompts_list)} 个提示词"
             else:
-                prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
+                prompt_preview = f"提示词: {prompts_list[0][:50]}"
             await update.message.reply_text(
                 f"✅ 提示词已保存！等图片上传完成后自动开始处理。\n\n{prompt_preview}",
                 reply_to_message_id=update.message.id
@@ -909,36 +893,25 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for entry in pending_list:
         task_counter += 1
         task_id = str(task_counter)
-        if len(prompts_list) > 1:
-            task = GenerationTask(
-                task_id=task_id,
-                user_id=update.effective_user.id,
-                chat_id=update.message.chat_id,
-                message_id=update.message.id,
-                rh_image_name=entry["rh_name"],
-                prompt=prompts_list[0],
-                prompts=prompts_list,
-                original_image_bytes=entry["image_bytes"],
-            )
-        else:
-            task = GenerationTask(
-                task_id=task_id,
-                user_id=update.effective_user.id,
-                chat_id=update.message.chat_id,
-                message_id=update.message.id,
-                rh_image_name=entry["rh_name"],
-                prompt=text,
-                original_image_bytes=entry["image_bytes"],
-            )
+        task = GenerationTask(
+            task_id=task_id,
+            user_id=update.effective_user.id,
+            chat_id=update.message.chat_id,
+            message_id=update.message.id,
+            rh_image_name=entry["rh_name"],
+            prompt=prompts_list[0],
+            prompts=prompts_list,
+            original_image_bytes=entry["image_bytes"],
+        )
         await task_queue.add_task(task)
         asyncio.create_task(task_queue.process_task(task_id, rh, context))
         task_ids.append(task_id)
 
     count = len(task_ids)
-    if len(prompts_list) > 1:
+    if has_multi:
         prompt_preview = f"共 {len(prompts_list)} 个提示词"
     else:
-        prompt_preview = f"提示词: {text[:50]}{'...' if len(text) > 50 else ''}"
+        prompt_preview = f"提示词: {prompts_list[0][:50]}"
     await update.message.reply_text(
         f"✅ {count}个任务已提交！\n\n"
         f"{prompt_preview}\n\n"
